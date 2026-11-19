@@ -73,10 +73,42 @@ fn read_cache() -> Vec<(String, u16)> {
     out
 }
 
+/// Fallback when the API returns nothing: `ipconfig /displaydns`. Its labels are localised, but every
+/// record block is "name" followed by a dashed line, so the line before each dashed line is the name.
+fn read_ipconfig() -> Result<Vec<(String, u16)>, String> {
+    let out = crate::util::run_hidden("ipconfig", &["/displaydns"])?;
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    let mut v = Vec::new();
+    for w in lines.windows(2) {
+        if w[1].len() > 10 && w[1].chars().all(|c| c == '-') && !w[0].is_empty() && !w[0].contains(' ') {
+            v.push((w[0].to_lowercase(), 0));
+        }
+    }
+    Ok(v)
+}
+
 pub fn worker() {
+    let mut last_state = String::new();
     loop {
         let now = now_ms();
-        let entries = read_cache();
+        let mut entries = read_cache();
+        let mut src = "api";
+        if entries.is_empty() {
+            src = "ipconfig";
+            entries = read_ipconfig().unwrap_or_else(|e| {
+                src = "none";
+                if !last_state.starts_with("none") {
+                    log(&format!("dns: ipconfig /displaydns failed: {e}"));
+                }
+                Vec::new()
+            });
+        }
+        // log only when the source changes, so the cause of an empty view is visible without spamming
+        let state = format!("{src} {}", if entries.is_empty() { "empty" } else { "ok" });
+        if state != last_state {
+            log(&format!("dns cache: {state} ({} entries, elevated={})", entries.len(), crate::net::elevated()));
+            last_state = state;
+        }
         {
             let mut m = LOCAL.lock().unwrap();
             for (name, _) in entries {
