@@ -32,6 +32,8 @@ static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static PLACED: AtomicBool = AtomicBool::new(false);
 static DIRTY_AT: AtomicU64 = AtomicU64::new(0);
 static PANEL: AtomicBool = AtomicBool::new(false);
+/// Running elevated on behalf of another account: HKCU (autostart) belongs to the admin user, not ours.
+static FOREIGN: AtomicBool = AtomicBool::new(false);
 
 struct PanelItem(CheckMenuItem<Wry>);
 
@@ -151,15 +153,21 @@ fn config_json() -> Value {
 }
 
 /// Relaunches NetMonitor elevated (UAC prompt). The new process waits for this one to exit first.
-fn elevate() -> Result<(), String> {
+fn elevate(owner: isize) -> Result<(), String> {
     #[link(name = "shell32")]
     extern "system" {
         fn ShellExecuteW(h: isize, op: *const u16, file: *const u16, params: *const u16, dir: *const u16, show: i32) -> isize;
     }
     let w = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let params = format!("--wait-parent {}", std::process::id());
-    let r = unsafe { ShellExecuteW(0, w("runas").as_ptr(), w(&exe.display().to_string()).as_ptr(), w(&params).as_ptr(), std::ptr::null(), 1) };
+    // A standard account elevates as a *different* user (e.g. admin-k), whose profile is not ours:
+    // hand our folders over so the admin instance keeps using this user's data, history and settings.
+    let env = |k: &str| std::env::var(k).unwrap_or_default();
+    let params = format!(
+        "--wait-parent {} --user-appdata \"{}\" --user-localappdata \"{}\"",
+        std::process::id(), env("APPDATA"), env("LOCALAPPDATA")
+    );
+    let r = unsafe { ShellExecuteW(owner, w("runas").as_ptr(), w(&exe.display().to_string()).as_ptr(), w(&params).as_ptr(), std::ptr::null(), 1) };
     if r > 32 {
         Ok(())
     } else {
@@ -208,7 +216,7 @@ async fn api(app: AppHandle, path: String, body: Option<Value>) -> Result<Value,
                     s.insert("startMinimized".into(), json!(v));
                 });
             }
-            if b.get("autostart").is_some() || b.get("startMinimized").is_some() {
+            if (b.get("autostart").is_some() || b.get("startMinimized").is_some()) && !FOREIGN.load(Ordering::SeqCst) {
                 let want = b.get("autostart").and_then(Value::as_bool).unwrap_or_else(win::autostart_enabled);
                 win::set_autostart(want, setting_bool("startMinimized", true));
             }
@@ -280,7 +288,8 @@ async fn api(app: AppHandle, path: String, body: Option<Value>) -> Result<Value,
         }
         ("update", None) => update::state(),
         ("notifyTest", _) => alerts::test(),
-        ("elevate", _) => match elevate() {
+        // owning the UAC prompt with our window brings it to the front instead of a flashing taskbar button
+        ("elevate", _) => match elevate(main_window(&app).as_ref().and_then(hwnd).unwrap_or(0)) {
             Ok(()) => {
                 let a = app.clone();
                 thread::spawn(move || {
@@ -368,8 +377,26 @@ fn tray_image(rx: f64, tx: f64) -> Image<'static> {
 }
 
 fn main() {
+    // release builds have no console: keep panics in the log instead of dying silently
+    std::panic::set_hook(Box::new(|info| util::log(&format!("panic: {info}"))));
     wait_parent();
-    tauri::Builder::default()
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).filter(|v| !v.is_empty());
+    if let (Some(roaming), Some(local)) = (arg("--user-appdata"), arg("--user-localappdata")) {
+        // must happen before util::DATA (and gh, for updates) first read them
+        std::env::set_var("APPDATA", roaming);
+        std::env::set_var("LOCALAPPDATA", local);
+        FOREIGN.store(true, Ordering::SeqCst);
+    }
+    if net::elevated() {
+        // WebView2 refuses a user-data folder that a process at another integrity level is (or was just)
+        // using, so the admin instance gets its own
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let dir = std::path::Path::new(&local).join("local.netmonitor.desktop").join("EBWebView-admin");
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", dir);
+        }
+    }
+    let r = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -379,7 +406,7 @@ fn main() {
             let _ = APP_HANDLE.set(handle.clone());
             util::init_known();
 
-            let release = !cfg!(debug_assertions);
+            let release = !cfg!(debug_assertions) && !FOREIGN.load(Ordering::SeqCst);
             if !util::path("settings.json").exists() {
                 update_settings(|s| {
                     s.insert("startMinimized".into(), json!(true));
@@ -507,6 +534,9 @@ fn main() {
             WindowEvent::Moved(_) | WindowEvent::Resized(_) => DIRTY_AT.store(now_ms(), Ordering::SeqCst),
             _ => {}
         })
-        .run(tauri::generate_context!())
-        .expect("error while running NetMonitor");
+        .run(tauri::generate_context!());
+    if let Err(e) = r {
+        util::log(&format!("startup failed (elevated={}): {e}", net::elevated()));
+        std::process::exit(1);
+    }
 }
