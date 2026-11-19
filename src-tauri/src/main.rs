@@ -1,9 +1,17 @@
 ﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! NetMonitor 2 — Tauri shell: samplers run on background threads, the UI polls them through `api`.
 
+mod alerts;
+mod discover;
+mod dns;
+mod geo;
+mod history;
 mod lan;
+mod monitor;
 mod net;
 mod router;
+mod speed;
+mod update;
 mod util;
 mod win;
 
@@ -121,6 +129,65 @@ fn settings_json() -> Value {
     })
 }
 
+fn config_json() -> Value {
+    let s = util::settings();
+    let mut notify = s.get("notify").cloned().unwrap_or(json!({}));
+    // the UI never gets the Telegram token back, only whether one is set
+    if let Some(t) = notify.get("telegramToken").and_then(Value::as_str) {
+        let set = !t.is_empty();
+        notify["telegramToken"] = json!(if set { "••••••" } else { "" });
+    }
+    let mut adg = s.get("adguard").cloned().unwrap_or(json!({}));
+    if adg.get("pass").and_then(Value::as_str).map(|p| !p.is_empty()).unwrap_or(false) {
+        adg["pass"] = json!("••••••");
+    }
+    json!({
+        "alerts": s.get("alerts").cloned().unwrap_or(json!({})),
+        "alertKinds": alerts::KINDS.iter().map(|(k, t)| json!({"key": k, "title": t})).collect::<Vec<_>>(),
+        "notify": notify, "speed": s.get("speed").cloned().unwrap_or(json!({})), "adguard": adg,
+        "autoUpdateCheck": setting_bool("autoUpdateCheck", true),
+        "elevated": net::elevated(), "geo": geo::status(),
+    })
+}
+
+/// Relaunches NetMonitor elevated (UAC prompt). The new process waits for this one to exit first.
+fn elevate() -> Result<(), String> {
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ShellExecuteW(h: isize, op: *const u16, file: *const u16, params: *const u16, dir: *const u16, show: i32) -> isize;
+    }
+    let w = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let params = format!("--wait-parent {}", std::process::id());
+    let r = unsafe { ShellExecuteW(0, w("runas").as_ptr(), w(&exe.display().to_string()).as_ptr(), w(&params).as_ptr(), std::ptr::null(), 1) };
+    if r > 32 {
+        Ok(())
+    } else {
+        Err("Se canceló la elevación".into())
+    }
+}
+
+fn wait_parent() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+        fn WaitForSingleObject(h: *mut std::ffi::c_void, ms: u32) -> u32;
+        fn CloseHandle(h: *mut std::ffi::c_void) -> i32;
+    }
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--wait-parent") {
+        if let Some(pid) = args.get(i + 1).and_then(|p| p.parse::<u32>().ok()) {
+            unsafe {
+                let h = OpenProcess(0x0010_0000, 0, pid); // SYNCHRONIZE
+                if !h.is_null() {
+                    WaitForSingleObject(h, 15_000);
+                    CloseHandle(h);
+                }
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn api(app: AppHandle, path: String, body: Option<Value>) -> Result<Value, String> {
     Ok(match (path.as_str(), body) {
@@ -132,7 +199,8 @@ async fn api(app: AppHandle, path: String, body: Option<Value>) -> Result<Value,
         ("ping", _) => net::ping_json(),
         ("info", _) => json!({
             "ifc": net::ifc(), "publicIp": net::PUBLIC_IP.lock().unwrap().clone(),
-            "exposure": exposure(), "version": util::VERSION,
+            "exposure": exposure(), "version": util::VERSION, "elevated": net::elevated(),
+            "publicCc": net::PUBLIC_IP.lock().unwrap().as_ref().and_then(|ip| ip.parse().ok()).and_then(|ip| geo::country(&ip)),
         }),
         ("settings", Some(b)) => {
             if let Some(v) = b.get("startMinimized").and_then(Value::as_bool) {
@@ -150,6 +218,79 @@ async fn api(app: AppHandle, path: String, body: Option<Value>) -> Result<Value,
             settings_json()
         }
         ("settings", None) => settings_json(),
+        ("config", Some(b)) => {
+            // alert rules, phone channels, speed test, AdGuard: plain objects merged into settings.json
+            for key in ["alerts", "notify", "speed", "adguard"] {
+                if let Some(Value::Object(patch)) = b.get(key) {
+                    update_settings(|s| {
+                        let cur = s.entry(key.to_string()).or_insert(json!({}));
+                        if let Value::Object(m) = cur {
+                            for (k, v) in patch {
+                                m.insert(k.clone(), v.clone());
+                            }
+                        }
+                    });
+                }
+            }
+            if let Some(v) = b.get("autoUpdateCheck").and_then(Value::as_bool) {
+                update_settings(|s| {
+                    s.insert("autoUpdateCheck".into(), json!(v));
+                });
+            }
+            config_json()
+        }
+        ("config", None) => config_json(),
+        ("hist", b) => {
+            let b = b.unwrap_or(json!({}));
+            history::query(b["range"].as_str().unwrap_or("24h"), b["off"].as_i64().unwrap_or(0))
+        }
+        ("alerts", _) => history::alerts(200),
+        ("speed", Some(_)) => json!({"started": speed::start()}),
+        ("speed", None) => speed::state(),
+        ("geo", _) => geo::status(),
+        ("dns", _) => dns::dns_json(),
+        ("procs", _) => net::procs_json(),
+        ("exposure", Some(_)) => router::refresh_exposure().unwrap_or_else(|e| json!({"error": e})),
+        ("exposure", None) => router::exposure_json(),
+        ("block", Some(b)) => {
+            let mac = b.get("mac").and_then(Value::as_str).ok_or("mac")?;
+            let name = b.get("name").and_then(Value::as_str).unwrap_or("");
+            let on = b.get("block").and_then(Value::as_bool).unwrap_or(true);
+            match router::block_device(mac, name, on) {
+                Ok(()) => json!({"ok": true}),
+                Err(e) => json!({"ok": false, "error": e}),
+            }
+        }
+        ("update", Some(b)) => {
+            if b.get("install").and_then(Value::as_bool).unwrap_or(false) {
+                match update::install() {
+                    Ok(()) => {
+                        let a = app.clone();
+                        thread::spawn(move || {
+                            thread::sleep(Duration::from_millis(800));
+                            a.exit(0);
+                        });
+                        json!({"ok": true})
+                    }
+                    Err(e) => json!({"ok": false, "error": e}),
+                }
+            } else {
+                update::check()
+            }
+        }
+        ("update", None) => update::state(),
+        ("notifyTest", _) => alerts::test(),
+        ("elevate", _) => match elevate() {
+            Ok(()) => {
+                let a = app.clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(300));
+                    a.exit(0);
+                });
+                json!({"ok": true})
+            }
+            Err(e) => json!({"ok": false, "error": e}),
+        },
         ("known", Some(b)) => {
             let mac = b.get("mac").and_then(Value::as_str).ok_or("mac")?;
             util::set_known(mac, b.get("label").and_then(Value::as_str).unwrap_or(""));
@@ -227,6 +368,7 @@ fn tray_image(rx: f64, tx: f64) -> Image<'static> {
 }
 
 fn main() {
+    wait_parent();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_notification::init())
@@ -310,15 +452,25 @@ fn main() {
                     }
                 })
             });
+            let _ = alerts::NOTIFY.set(Box::new(|t: &str, b: &str| notify(t, b)));
+            history::init();
             thread::spawn(|| {
                 lan::scanner(|ip, mac, host| {
+                    let vendor = discover::vendor(mac).map(|v| format!(" · {v}")).unwrap_or_default();
                     let what = if host.is_empty() { mac.to_string() } else { format!("{host} · {mac}") };
-                    notify("Dispositivo nuevo en la red", &format!("{ip}  {what}"));
+                    alerts::fire("newDevice", "Dispositivo nuevo en la red", &format!("{ip}  {what}{vendor}"));
                 })
             });
             thread::spawn(net::ping_worker);
             thread::spawn(net::public_ip_worker);
             thread::spawn(router::worker);
+            thread::spawn(monitor::worker);
+            thread::spawn(speed::scheduler);
+            thread::spawn(discover::worker);
+            thread::spawn(geo::worker);
+            thread::spawn(dns::worker);
+            thread::spawn(net::estats_worker);
+            thread::spawn(update::worker);
 
             // ---- window
             if let Some(w) = main_window(&handle) {

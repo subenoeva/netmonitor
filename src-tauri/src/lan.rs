@@ -126,6 +126,7 @@ pub fn lan_json() -> Value {
     let known = known();
     let rdevs = crate::router::devices();
     let names: BTreeMap<String, String> = rdevs.iter().map(|d| (d.mac.clone(), d.name.clone())).collect();
+    let blocked = crate::router::ROUTER.lock().unwrap().blocked.clone();
     let lan = LAN.lock().unwrap();
     let mut devs: Vec<Dev> = lan.devs.values().cloned().collect();
     for r in &rdevs {
@@ -150,8 +151,55 @@ pub fn lan_json() -> Value {
             o.insert("randomMac".into(), json!(d.mac.chars().nth(1).map(|c| "26AE".contains(c)).unwrap_or(false)));
             o.insert("me".into(), json!(d.ip == me.ip));
             o.insert("gw".into(), json!(d.ip == me.gw));
+            o.insert("vendor".into(), json!(crate::discover::vendor(&d.mac)));
+            let f = crate::discover::found(&d.ip).unwrap_or_default();
+            o.insert("auto".into(), json!(f.best()));
+            o.insert("model".into(), json!(if f.model.is_empty() { None } else { Some(format!("{} {}", f.upnp_vendor, f.model).trim().to_string()) }));
+            o.insert("blocked".into(), json!(blocked.contains(&d.mac)));
             v
         })
         .collect();
     json!({"devices": out, "lastScan": lan.last_scan, "scanning": lan.scanning})
+}
+
+fn real(s: &str) -> bool {
+    let t = s.trim();
+    !t.is_empty() && !matches!(t.to_lowercase().as_str(), "unknown" | "desconocido" | "*" | "-")
+}
+
+/// Best human name for a MAC: user label > router hostname > self-announced name > reverse DNS > vendor > MAC.
+pub fn display_name(mac: &str) -> String {
+    if let Some(l) = known().get(mac).and_then(Value::as_str) {
+        return l.to_string();
+    }
+    if let Some(r) = crate::router::devices().into_iter().find(|d| d.mac == mac).filter(|d| real(&d.name)) {
+        return r.name;
+    }
+    let ip_h = LAN.lock().unwrap().devs.get(mac).map(|d| (d.ip.clone(), d.h.clone()));
+    if let Some((ip, h)) = ip_h {
+        if let Some(f) = crate::discover::found(&ip) {
+            if real(&f.best()) {
+                return f.best();
+            }
+        }
+        if real(&h) {
+            return h;
+        }
+    }
+    crate::discover::vendor(mac).map(|v| format!("Dispositivo {v}")).unwrap_or_else(|| mac.to_string())
+}
+
+/// (mac, name, ip) of devices online right now that the user has not named.
+pub fn unknown_up() -> Vec<(String, String, String)> {
+    let k = known();
+    let me = ifc();
+    let lan = LAN.lock().unwrap();
+    let list: Vec<(String, String)> = lan
+        .devs
+        .values()
+        .filter(|d| d.up && !k.contains_key(&d.mac) && d.ip != me.ip && d.ip != me.gw)
+        .map(|d| (d.mac.clone(), d.ip.clone()))
+        .collect();
+    drop(lan);
+    list.into_iter().map(|(m, ip)| (m.clone(), display_name(&m), ip)).collect()
 }

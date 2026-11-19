@@ -102,6 +102,45 @@ pub fn update_settings(f: impl FnOnce(&mut Map<String, Value>)) {
     save_json("settings.json", &Value::Object(s));
 }
 
+#[repr(C)]
+#[derive(Default)]
+struct SystemTime16 {
+    year: u16,
+    month: u16,
+    dow: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    ms: u16,
+}
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetLocalTime(st: *mut SystemTime16);
+}
+
+/// (year, month, day, hour, minute) in local time.
+pub fn local_time() -> (u16, u16, u16, u16, u16) {
+    let mut st = SystemTime16::default();
+    unsafe { GetLocalTime(&mut st) };
+    (st.year, st.month, st.day, st.hour, st.minute)
+}
+
+/// Hidden-console command runner (gh, powershell) returning stdout.
+pub fn run_hidden(exe: &str, args: &[&str]) -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new(exe)
+        .args(args)
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .map_err(|e| format!("{exe}: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().chars().take(300).collect())
+    }
+}
+
 pub fn fmt_rate(bytes_per_s: f64) -> String {
     let b = bytes_per_s * 8.0;
     if b >= 1e9 {

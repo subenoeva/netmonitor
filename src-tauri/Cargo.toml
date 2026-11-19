@@ -1,6 +1,6 @@
 [package]
 name = "netmonitor"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 
 [build-dependencies]
@@ -10,9 +10,11 @@ tauri-build = { version = "2.7.6", features = [] }
 aes = "0.8"
 base64 = "0.22"
 dns-lookup = "4.0.2"
+flate2 = "1.1.11"
 md-5 = "0.10"
 netdev = "0.47.0"
 num-bigint = "0.4"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tauri = { version = "2.12.7", features = ["tray-icon"] }

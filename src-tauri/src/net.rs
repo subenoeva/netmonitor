@@ -398,9 +398,11 @@ pub fn conns_json() -> Value {
             listen.entry(c.lport).or_insert_with(|| proc_name(c.pid));
         } else if c.state == 5 && !c.raddr.is_loopback() {
             let ip = c.raddr.to_string();
+            let lan = is_lan(&c.raddr);
             conns.push(json!({
                 "p": proc_name(c.pid), "lp": c.lport, "ra": ip, "rp": c.rport,
-                "h": rdns(&ip), "lan": is_lan(&c.raddr), "v6": c.raddr.is_ipv6(),
+                "h": rdns(&ip), "lan": lan, "v6": c.raddr.is_ipv6(),
+                "cc": if lan { None } else { crate::geo::country(&c.raddr) },
             }));
         }
     }
@@ -426,6 +428,7 @@ pub fn ping_worker() {
         let gw = ifc().gw;
         let a = if gw.is_empty() { None } else { tcp_rtt(&format!("{gw}:80")) };
         let b = tcp_rtt("1.1.1.1:443");
+        crate::monitor::on_ping(a, b);
         {
             let mut p = PING.lock().unwrap();
             p.0.push_back(a);
@@ -470,4 +473,127 @@ pub fn public_ip_worker() {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ per-process traffic (TCP EStats)
+// Windows only lets an elevated process switch on per-connection byte counters, so this works when
+// NetMonitor runs as administrator; otherwise the UI shows connection counts only.
+#[link(name = "shell32")]
+extern "system" {
+    fn IsUserAnAdmin() -> i32;
+}
+#[link(name = "iphlpapi")]
+extern "system" {
+    fn SetPerTcpConnectionEStats(row: *const u8, kind: i32, rw: *const u8, ver: u32, size: u32, off: u32) -> u32;
+    fn GetPerTcpConnectionEStats(row: *const u8, kind: i32, rw: *mut u8, rwv: u32, rws: u32, ros: *mut u8, rosv: u32, ross: u32, rod: *mut u8, rodv: u32, rods: u32) -> u32;
+    fn SetPerTcp6ConnectionEStats(row: *const u8, kind: i32, rw: *const u8, ver: u32, size: u32, off: u32) -> u32;
+    fn GetPerTcp6ConnectionEStats(row: *const u8, kind: i32, rw: *mut u8, rwv: u32, rws: u32, ros: *mut u8, rosv: u32, ross: u32, rod: *mut u8, rodv: u32, rods: u32) -> u32;
+}
+
+pub fn elevated() -> bool {
+    unsafe { IsUserAnAdmin() != 0 }
+}
+
+fn be_port(p: u16) -> [u8; 4] {
+    [(p >> 8) as u8, p as u8, 0, 0]
+}
+
+/// MIB_TCPROW / MIB_TCP6ROW bytes for a connection.
+fn row_bytes(c: &Conn) -> (bool, Vec<u8>) {
+    match (c.laddr, c.raddr) {
+        (IpAddr::V4(l), IpAddr::V4(r)) => {
+            let mut v = Vec::with_capacity(20);
+            v.extend_from_slice(&c.state.to_le_bytes());
+            v.extend_from_slice(&l.octets());
+            v.extend_from_slice(&be_port(c.lport));
+            v.extend_from_slice(&r.octets());
+            v.extend_from_slice(&be_port(c.rport));
+            (false, v)
+        }
+        (l, r) => {
+            let six = |a: IpAddr| match a {
+                IpAddr::V6(x) => x.octets(),
+                IpAddr::V4(x) => x.to_ipv6_mapped().octets(),
+            };
+            let mut v = Vec::with_capacity(52);
+            v.extend_from_slice(&c.state.to_le_bytes());
+            v.extend_from_slice(&six(l));
+            v.extend_from_slice(&0u32.to_le_bytes());
+            v.extend_from_slice(&be_port(c.lport));
+            v.extend_from_slice(&six(r));
+            v.extend_from_slice(&0u32.to_le_bytes());
+            v.extend_from_slice(&be_port(c.rport));
+            (true, v)
+        }
+    }
+}
+
+pub static PROC_RATES: LazyLock<Mutex<Vec<(String, f64, f64)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+pub fn estats_worker() {
+    if !elevated() {
+        return;
+    }
+    let mut enabled: std::collections::HashSet<String> = Default::default();
+    let mut prev: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut last = Instant::now();
+    loop {
+        thread::sleep(Duration::from_secs(2));
+        let dt = last.elapsed().as_secs_f64();
+        last = Instant::now();
+        let me = std::process::id();
+        let mut cur: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut per: HashMap<String, (f64, f64)> = HashMap::new();
+        for c in tcp_conns() {
+            if c.state != 5 || c.pid == me || c.raddr.is_loopback() {
+                continue;
+            }
+            let key = format!("{}:{}-{}:{}", c.laddr, c.lport, c.raddr, c.rport);
+            let (v6, row) = row_bytes(&c);
+            unsafe {
+                if !enabled.contains(&key) {
+                    let on = [1u8];
+                    let r = if v6 {
+                        SetPerTcp6ConnectionEStats(row.as_ptr(), 1, on.as_ptr(), 0, 1, 0)
+                    } else {
+                        SetPerTcpConnectionEStats(row.as_ptr(), 1, on.as_ptr(), 0, 1, 0)
+                    };
+                    if r == 0 {
+                        enabled.insert(key.clone());
+                    }
+                    continue;
+                }
+                let mut rod = [0u8; 128];
+                let r = if v6 {
+                    GetPerTcp6ConnectionEStats(row.as_ptr(), 1, std::ptr::null_mut(), 0, 0, std::ptr::null_mut(), 0, 0, rod.as_mut_ptr(), 0, 96)
+                } else {
+                    GetPerTcpConnectionEStats(row.as_ptr(), 1, std::ptr::null_mut(), 0, 0, std::ptr::null_mut(), 0, 0, rod.as_mut_ptr(), 0, 96)
+                };
+                if r != 0 {
+                    continue;
+                }
+                let out = u64::from_le_bytes(rod[0..8].try_into().unwrap());
+                let inb = u64::from_le_bytes(rod[16..24].try_into().unwrap());
+                if let Some((pi, po)) = prev.get(&key) {
+                    let e = per.entry(proc_name(c.pid)).or_insert((0.0, 0.0));
+                    e.0 += inb.saturating_sub(*pi) as f64 / dt;
+                    e.1 += out.saturating_sub(*po) as f64 / dt;
+                }
+                cur.insert(key, (inb, out));
+            }
+        }
+        enabled.retain(|k| cur.contains_key(k) || prev.contains_key(k));
+        prev = cur;
+        let mut v: Vec<(String, f64, f64)> = per.into_iter().map(|(k, (a, b))| (k, a, b)).collect();
+        v.sort_by(|a, b| (b.1 + b.2).partial_cmp(&(a.1 + a.2)).unwrap());
+        *PROC_RATES.lock().unwrap() = v;
+    }
+}
+
+pub fn procs_json() -> Value {
+    let v = PROC_RATES.lock().unwrap();
+    json!({
+        "elevated": elevated(),
+        "rates": v.iter().map(|(p, rx, tx)| json!({"p": p, "rx": rx, "tx": tx})).collect::<Vec<_>>(),
+    })
 }
