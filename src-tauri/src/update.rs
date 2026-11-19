@@ -49,35 +49,47 @@ pub fn check() -> Value {
     v
 }
 
-/// Downloads the latest installer and launches it silently; the caller exits the app afterwards.
+/// Downloads the latest installer and runs it silently; the caller exits the app afterwards.
+///
+/// Everything runs from a small script started through explorer.exe, i.e. as the desktop user and not
+/// elevated, even when NetMonitor itself runs elevated as another account (admin-k): that account has no
+/// gh login (downloads failed with 401) and the per-user installer would land in its profile.
 pub fn install() -> Result<(), String> {
     let s = state();
     let tag = s["latest"].as_str().ok_or("Primero busca actualizaciones")?.to_string();
-    let dir = std::env::temp_dir().join("netmonitor-update");
+    // LOCALAPPDATA is the desktop user's even when elevated as another account (see main)
+    let local = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").map_err(|e| e.to_string())?);
+    let dir = local.join("Temp").join("netmonitor-update");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // restart the installed copy (the installer may move it), else the one running now
+    let installed = local.join("NetMonitor").join("netmonitor.exe");
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
     let d = dir.display().to_string();
-    run_hidden("gh", &["release", "download", &tag, "--repo", REPO, "--pattern", "*setup.exe", "--dir", &d, "--clobber"])?;
-    let setup = std::fs::read_dir(&dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| p.extension().map(|x| x == "exe").unwrap_or(false))
-        .ok_or("La versión no incluye instalador")?;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let ps = format!(
-        "Start-Sleep -Seconds 2; Start-Process -Wait -FilePath '{}' -ArgumentList '/S'; Start-Process -FilePath '{}'",
-        setup.display().to_string().replace('\'', "''"),
-        exe.display().to_string().replace('\'', "''")
+    let script = format!(
+        "@echo off\r\n\
+         timeout /t 2 /nobreak >nul\r\n\
+         gh release download {tag} --repo {REPO} --pattern \"*setup.exe\" --dir \"{d}\" --clobber > \"{d}\\update.log\" 2>&1\r\n\
+         for %%f in (\"{d}\\*setup.exe\") do \"%%f\" /S\r\n\
+         if exist \"{inst}\" (start \"\" \"{inst}\") else (start \"\" \"{cur}\")\r\n",
+        inst = installed.display(),
+        cur = current.display(),
     );
-    use std::os::windows::process::CommandExt;
-    std::process::Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
-        .creation_flags(0x0800_0000 | 0x0000_0008) // CREATE_NO_WINDOW | DETACHED_PROCESS
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    let cmd = dir.join("update.cmd");
+    std::fs::write(&cmd, script).map_err(|e| e.to_string())?;
+    run_hidden_detached("explorer.exe", &cmd.display().to_string())?;
     log(&format!("update: installing {tag}"));
     Ok(())
+}
+
+fn run_hidden_detached(exe: &str, arg: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new(exe)
+        .arg(arg)
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 pub fn worker() {

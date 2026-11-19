@@ -104,7 +104,8 @@ pub fn worker() {
             });
         }
         // log only when the source changes, so the cause of an empty view is visible without spamming
-        let state = format!("{src} {}", if entries.is_empty() { "empty" } else { "ok" });
+        // the cache is often momentarily empty (Windows flushes it), so only the source counts as a change
+        let state = src.to_string();
         if state != last_state {
             log(&format!("dns cache: {state} ({} entries, elevated={})", entries.len(), crate::net::elevated()));
             last_state = state;
