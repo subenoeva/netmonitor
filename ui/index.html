@@ -1,0 +1,764 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NetMonitor</title>
+<style>
+:root{
+  --bg:#0B0D10; --panel:#111419; --panel2:#161A21; --line:#1E232B; --line2:#2A313B;
+  --text:#E6E9EF; --mute:#8D96A6; --dim:#5D6675;
+  --down:#5AA9FF; --up:#FFA94D; --ok:#3DD68C; --warn:#F5C451; --bad:#FF6B6B;
+  --r:14px; --pad:18px;
+  --sans:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  --disp:"Segoe UI Variable Display","Segoe UI",system-ui,sans-serif;
+  --mono:"Cascadia Mono","Cascadia Code",Consolas,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--text);font:14px/1.45 var(--sans);-webkit-font-smoothing:antialiased;overflow-x:hidden}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:radial-gradient(1200px 600px at 15% -10%,rgba(90,169,255,.07),transparent 60%),radial-gradient(900px 500px at 100% 0%,rgba(255,169,77,.045),transparent 60%)}
+button{font:inherit;color:inherit}
+.num{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--mono);font-size:12.5px}
+.mute{color:var(--mute)} .dim{color:var(--dim)}
+.c-down{color:var(--down)} .c-up{color:var(--up)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#262c35;border-radius:10px;border:2px solid var(--panel)}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ---------------------------------------------------------------- top bar */
+.bar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;height:54px;padding:0 16px;
+  background:rgba(11,13,16,.82);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:10px;font:600 15px var(--disp);letter-spacing:.2px;white-space:nowrap}
+.brand svg{flex:none}
+.ifc{display:flex;align-items:center;gap:8px;min-width:0;padding:5px 11px;border:1px solid var(--line2);border-radius:999px;color:var(--mute);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ifc b{color:var(--text);font-weight:600}
+.sp{flex:1;min-width:8px;align-self:stretch}
+.status{display:flex;gap:14px;color:var(--mute);font-size:12px;white-space:nowrap}
+.status span{display:flex;align-items:center;gap:6px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--dim);flex:none}
+.dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(61,214,140,.14)}
+.dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
+.ib{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;border:1px solid transparent;background:transparent;color:var(--mute);cursor:pointer;flex:none}
+.ib:hover{background:var(--panel2);color:var(--text);border-color:var(--line2)}
+.ib.on{color:var(--down);background:rgba(90,169,255,.1);border-color:rgba(90,169,255,.35)}
+
+/* ---------------------------------------------------------------- grid */
+main{position:relative;z-index:1;display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px;padding:14px;grid-auto-flow:row dense;align-items:start}
+.card{grid-column:span 12;background:linear-gradient(180deg,var(--panel),#0F1216);border:1px solid var(--line);border-radius:var(--r);padding:var(--pad);min-width:0}
+.hd{display:flex;align-items:baseline;gap:10px;margin:0 0 14px}
+.hd h2{margin:0;font:600 13px var(--sans);letter-spacing:.3px;color:var(--text)}
+.hd .sub{color:var(--mute);font-size:12px}
+.hd .sp{align-self:auto}
+.tag{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:.2px;border:1px solid var(--line2);color:var(--mute);white-space:nowrap}
+.tag.warn{color:var(--warn);border-color:rgba(245,196,81,.35);background:rgba(245,196,81,.08)}
+.tag.new{color:#0B0D10;background:var(--warn);border-color:var(--warn)}
+.tag.ok{color:var(--ok);border-color:rgba(61,214,140,.3);background:rgba(61,214,140,.07)}
+.tag.bad{color:var(--bad);border-color:rgba(255,107,107,.35);background:rgba(255,107,107,.08)}
+
+@media (min-width:860px){
+  .c-dev{grid-column:span 12}.c-stream{grid-column:span 6}.c-proc{grid-column:span 6}
+  .c-conn{grid-column:span 12}.c-act{grid-column:span 6}.c-sec{grid-column:span 6}
+}
+@media (min-width:1420px){
+  .c-dev{grid-column:span 7}.c-stream{grid-column:span 5}
+  .c-conn{grid-column:span 8}.c-proc{grid-column:span 4}
+  .c-act{grid-column:span 6}.c-sec{grid-column:span 6}
+}
+
+/* ---------------------------------------------------------------- hero */
+.hero{display:grid;grid-template-columns:minmax(230px,300px) minmax(0,1fr);gap:22px;align-items:stretch}
+.now{display:flex;flex-direction:column;justify-content:center;gap:18px}
+.big .lab{display:flex;align-items:center;gap:8px;color:var(--mute);font-size:12px;font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+.big .lab i{width:9px;height:9px;border-radius:3px}
+.big .val{font:300 clamp(40px,5.2vw,64px)/1.02 var(--disp);letter-spacing:-1.5px;margin-top:4px;white-space:nowrap}
+.big .val small{font:500 15px var(--sans);letter-spacing:0;color:var(--mute);margin-left:6px}
+.big .meta{display:flex;gap:14px;color:var(--mute);font-size:12px;margin-top:4px}
+.big .meta b{color:var(--text);font-weight:600}
+.chartbox{position:relative;min-width:0;height:clamp(200px,26vh,400px)}
+.chartbox canvas,.cv canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.cv{position:relative}
+.hover{position:absolute;pointer-events:none;padding:7px 10px;border-radius:9px;background:rgba(17,20,25,.96);border:1px solid var(--line2);font-size:12px;white-space:nowrap;opacity:0;transition:opacity .12s;z-index:5;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:18px}
+.st{position:relative;background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:11px 13px 10px;overflow:hidden;min-height:76px}
+.st .l{color:var(--mute);font-size:11.5px;font-weight:600;letter-spacing:.3px}
+.st .v{font:500 22px/1.2 var(--disp);margin-top:3px}
+.st .v small{font-size:12px;color:var(--mute);font-weight:500;margin-left:3px}
+.st .s{color:var(--dim);font-size:11.5px}
+.st.has-k{padding-bottom:38px}
+.st canvas{position:absolute;left:13px;bottom:8px;width:calc(100% - 26px);height:24px;opacity:.9}
+.blur .v{filter:blur(6px);transition:filter .2s}.blur:hover .v{filter:none}
+@media (max-width:760px){.hero{grid-template-columns:1fr}.now{flex-direction:row;flex-wrap:wrap;gap:22px 34px}}
+
+/* ---------------------------------------------------------------- devices */
+.devs{display:flex;flex-direction:column}
+.dv{display:grid;grid-template-columns:36px minmax(0,1fr) minmax(120px,190px) 96px;gap:12px;align-items:center;padding:10px 6px;border-top:1px solid var(--line)}
+.dv:first-child{border-top:0}
+.dv:hover{background:rgba(255,255,255,.015)}
+.dv.off{opacity:.5}
+.gl{position:relative;display:grid;place-items:center;width:36px;height:36px;border-radius:10px;background:var(--panel2);border:1px solid var(--line2);color:var(--mute)}
+.gl .sd{position:absolute;right:-2px;bottom:-2px;width:10px;height:10px;border-radius:50%;border:2px solid var(--panel);background:var(--dim)}
+.gl .sd.on{background:var(--ok)}
+.nm{min-width:0}
+.nm .n{display:flex;align-items:center;gap:8px;font-weight:600;white-space:nowrap;overflow:hidden}
+.nm .n span.t{overflow:hidden;text-overflow:ellipsis;cursor:text;border-bottom:1px dashed transparent}
+.nm .n span.t:hover{border-bottom-color:var(--dim)}
+.nm .n input{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--down);border-radius:6px;padding:1px 6px;width:100%;outline:none}
+.nm .m{color:var(--mute);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nm .m .mono{font-size:11.5px}
+.rt{display:flex;flex-direction:column;gap:5px}
+.rt .row{display:grid;grid-template-columns:12px 1fr 74px;gap:6px;align-items:center;font-size:12px}
+.rt .tr{height:5px;border-radius:5px;background:#1A1F27;overflow:hidden}
+.rt .tr i{display:block;height:100%;border-radius:5px;transition:width .6s ease}
+.rt .row span{text-align:right;color:var(--mute)}
+.spk{width:96px;height:34px}
+.dv-head{display:flex;gap:8px;align-items:center}
+.seg{display:inline-flex;border:1px solid var(--line2);border-radius:9px;overflow:hidden}
+.seg button{background:transparent;border:0;padding:4px 10px;font-size:12px;color:var(--mute);cursor:pointer}
+.seg button.on{background:var(--panel2);color:var(--text)}
+@media (max-width:640px){.dv{grid-template-columns:36px minmax(0,1fr) 110px}.dv .spk{display:none}}
+
+/* ---------------------------------------------------------------- stream */
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:12px;font-size:12px;color:var(--mute)}
+.legend span{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.legend i{width:9px;height:9px;border-radius:3px}
+.note{color:var(--dim);font-size:12px;margin-top:10px}
+
+/* ---------------------------------------------------------------- programs */
+.pr{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;padding:9px 0;border-top:1px solid var(--line)}
+.pr:first-child{border-top:0}
+.pr .n{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pr .c{color:var(--mute);font-size:12px;text-align:right}
+.pr .h{grid-column:1/-1;color:var(--dim);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pr .b{grid-column:1/-1;height:4px;border-radius:4px;background:#1A1F27;overflow:hidden;margin-top:3px}
+.pr .b i{display:block;height:100%;background:linear-gradient(90deg,var(--down),#8AC3FF);border-radius:4px}
+
+/* ---------------------------------------------------------------- tables */
+.search{display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--line2);border-radius:10px;padding:7px 11px;margin-bottom:10px;color:var(--mute)}
+.search input{flex:1;background:transparent;border:0;outline:0;color:var(--text);font:inherit;min-width:0}
+.tbl{max-height:clamp(260px,38vh,680px);overflow:auto;border-radius:10px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{position:sticky;top:0;background:var(--panel);text-align:left;font-weight:600;font-size:11.5px;letter-spacing:.3px;color:var(--mute);padding:8px 10px;border-bottom:1px solid var(--line2);z-index:1}
+td{padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}
+tr:hover td{background:rgba(255,255,255,.015)}
+@media (max-width:640px){.hide-n{display:none}}
+
+/* ---------------------------------------------------------------- activity */
+.log{max-height:clamp(240px,34vh,560px);overflow:auto;font-size:12.5px}
+.ev{display:grid;grid-template-columns:62px 14px minmax(0,1fr);gap:8px;align-items:baseline;padding:5px 0;border-top:1px solid var(--line)}
+.ev:first-child{border-top:0}
+.ev .t{color:var(--dim);font-family:var(--mono);font-size:11.5px}
+.ev .k{width:8px;height:8px;border-radius:50%;align-self:center}
+.ev .x{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ev.fresh{animation:fresh 1.6s ease}
+@keyframes fresh{from{background:rgba(90,169,255,.12)}to{background:transparent}}
+
+/* ---------------------------------------------------------------- security */
+.chk{display:grid;grid-template-columns:22px minmax(0,1fr);gap:10px;padding:8px 0;border-top:1px solid var(--line)}
+.chk:first-child{border-top:0}
+.chk svg{margin-top:1px}
+.chk.ok svg{color:var(--ok)} .chk.warn svg{color:var(--warn)}
+.chk small{display:block;color:var(--mute);font-size:12px}
+.ports{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.port{font-family:var(--mono);font-size:11.5px;padding:3px 8px;border-radius:7px;background:var(--panel2);border:1px solid var(--line2);color:var(--mute)}
+.port b{color:var(--text);font-weight:600}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:7px 13px;border-radius:9px;border:1px solid var(--line2);background:var(--panel2);cursor:pointer;font-size:12.5px;font-weight:600}
+.btn:hover{border-color:var(--down);color:var(--down)}
+
+/* ---------------------------------------------------------------- drawer & toasts */
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(360px,100vw);z-index:40;background:#101318;border-left:1px solid var(--line2);padding:22px;transform:translateX(100%);transition:transform .25s ease;display:flex;flex-direction:column;gap:6px;box-shadow:-20px 0 50px rgba(0,0,0,.4)}
+.drawer.open{transform:none}
+.drawer h3{margin:0 0 12px;font:600 16px var(--disp)}
+.opt{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:12px 0;border-bottom:1px solid var(--line)}
+.opt small{display:block;color:var(--mute);font-size:12px}
+.tg{position:relative;width:40px;height:22px;border-radius:22px;background:#2A313B;cursor:pointer;flex:none;transition:background .2s;border:0}
+.tg::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#C9D0DB;transition:transform .2s}
+.tg.on{background:var(--down)}.tg.on::after{transform:translateX(18px);background:#fff}
+.kv{color:var(--mute);font-size:12.5px;line-height:1.8;margin-top:12px;word-break:break-all}
+.kv b{color:var(--text);font-weight:600}
+.toasts{position:fixed;right:16px;bottom:16px;z-index:50;display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+.toast{max-width:360px;padding:11px 14px;border-radius:11px;background:#151920;border:1px solid var(--line2);border-left:3px solid var(--warn);box-shadow:0 10px 30px rgba(0,0,0,.45);font-size:13px;animation:tin .25s ease}
+.toast b{display:block;margin-bottom:2px}
+@keyframes tin{from{transform:translateY(8px);opacity:0}}
+.scrim{position:fixed;inset:0;z-index:30;background:rgba(0,0,0,.35);opacity:0;pointer-events:none;transition:opacity .2s}
+.scrim.on{opacity:1;pointer-events:auto}
+
+body.panel .bar{background:rgba(11,13,16,.95)}
+@media (max-width:900px){.status{display:none}}
+@media (max-width:620px){.ifc{display:none}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<header class="bar" data-tauri-drag-region>
+  <div class="brand" data-tauri-drag-region>
+    <svg width="22" height="22" viewBox="0 0 24 24"><rect x="1" y="1" width="22" height="22" rx="6" fill="#161A21" stroke="#2A313B"/><rect x="6.5" y="6" width="4" height="12" rx="1.6" fill="#5AA9FF"/><rect x="13.5" y="9.5" width="4" height="8.5" rx="1.6" fill="#FFA94D"/></svg>
+    NetMonitor
+  </div>
+  <div class="ifc" id="ifc">detectando interfaz…</div>
+  <div class="sp" data-tauri-drag-region></div>
+  <div class="status" data-tauri-drag-region>
+    <span title="Monitor de tráfico del router"><i class="dot" id="sRouter"></i>Router</span>
+    <span title="Barrido ARP de la red local"><i class="dot" id="sLan"></i><span id="sLanT">Red local</span></span>
+    <span title="Latencia a internet"><i class="dot" id="sNet"></i>Internet</span>
+  </div>
+  <button class="ib" id="bPanel" title="Modo panel: sin bordes y siempre encima" aria-label="Modo panel"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.8V4h6v6.8l3 3.2v2H6v-2z"/></svg></button>
+  <button class="ib" id="bFull" title="Pantalla completa (F11)" aria-label="Pantalla completa"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+  <button class="ib" id="bSet" title="Ajustes" aria-label="Ajustes"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></button>
+</header>
+
+<main>
+  <section class="card">
+    <div class="hero">
+      <div class="now">
+        <div class="big">
+          <div class="lab"><i style="background:var(--down)"></i>Bajada</div>
+          <div class="val num" id="vDown">—</div>
+          <div class="meta"><span>pico <b class="num" id="pDown">—</b></span><span>sesión <b class="num" id="sDown">—</b></span></div>
+        </div>
+        <div class="big">
+          <div class="lab"><i style="background:var(--up)"></i>Subida</div>
+          <div class="val num" id="vUp">—</div>
+          <div class="meta"><span>pico <b class="num" id="pUp">—</b></span><span>sesión <b class="num" id="sUp">—</b></span></div>
+        </div>
+      </div>
+      <div class="chartbox" id="mainBox"><canvas id="main"></canvas><div class="hover" id="mainTip"></div></div>
+    </div>
+    <div class="stats">
+      <div class="st has-k"><div class="l">Latencia router</div><div class="v num" id="lGw">—</div><div class="s" id="lGwS">—</div><canvas id="kGw"></canvas></div>
+      <div class="st has-k"><div class="l">Latencia internet</div><div class="v num" id="lNet">—</div><div class="s" id="lNetS">1.1.1.1</div><canvas id="kNet"></canvas></div>
+      <div class="st"><div class="l">Dispositivos</div><div class="v num" id="nDev">—</div><div class="s" id="nDevS">—</div></div>
+      <div class="st"><div class="l">Conexiones TCP</div><div class="v num" id="nCon">—</div><div class="s" id="nConS">—</div></div>
+      <div class="st blur" title="Pasa el ratón para verla"><div class="l">IP pública</div><div class="v mono" id="pub" style="font-size:16px;margin-top:7px">—</div><div class="s">pasa el ratón</div></div>
+    </div>
+  </section>
+
+  <section class="card c-dev">
+    <div class="hd"><h2>Dispositivos</h2><span class="sub" id="devSub">—</span><span class="sp"></span>
+      <div class="seg" id="devSort"><button data-k="rate" class="on">Actividad</button><button data-k="ip">IP</button></div>
+    </div>
+    <div class="devs" id="devs"></div>
+    <div class="note" id="devNote">Tráfico por dispositivo del monitor del router (solo IPv4). Haz clic en un nombre para renombrarlo.</div>
+  </section>
+
+  <section class="card c-stream">
+    <div class="hd"><h2>Reparto del tráfico</h2><span class="sub">últimos 10 min · por dispositivo</span></div>
+    <div class="cv" style="height:clamp(220px,30vh,460px)" id="streamBox"><canvas id="stream"></canvas><div class="hover" id="streamTip"></div></div>
+    <div class="legend" id="streamLeg"></div>
+  </section>
+
+  <section class="card c-proc">
+    <div class="hd"><h2>Programas con red</h2><span class="sub" id="procSub">—</span></div>
+    <div id="procs"></div>
+  </section>
+
+  <section class="card c-conn">
+    <div class="hd"><h2>Conexiones</h2><span class="sub" id="connSub">—</span></div>
+    <label class="search"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><input id="filter" placeholder="Filtrar por programa, IP, host o puerto"></label>
+    <div class="tbl"><table><thead><tr><th style="width:24%">Programa</th><th>Destino</th><th class="hide-n" style="width:76px">Puerto</th><th style="width:116px">Red</th></tr></thead><tbody id="conns"></tbody></table></div>
+  </section>
+
+  <section class="card c-act">
+    <div class="hd"><h2>Actividad</h2><span class="sub">conexiones nuevas y cambios en la red</span></div>
+    <div class="log" id="log"></div>
+  </section>
+
+  <section class="card c-sec">
+    <div class="hd"><h2>Exposición desde internet</h2><span class="sp"></span><span class="tag" id="expDate">—</span></div>
+    <div id="sec"></div>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:12px"><button class="btn" id="bShields">Repetir prueba en ShieldsUP ↗</button></div>
+    <div class="hd" style="margin:18px 0 4px"><h2>Puertos a la escucha en este PC</h2></div>
+    <div class="ports" id="ports"></div>
+  </section>
+</main>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="Ajustes">
+  <h3>Ajustes</h3>
+  <div class="opt"><div>Iniciar con Windows<small>Se abre al iniciar sesión</small></div><button class="tg" id="tAuto" aria-label="Iniciar con Windows"></button></div>
+  <div class="opt"><div>Arrancar en la bandeja<small>Al iniciar con Windows, sin abrir la ventana</small></div><button class="tg" id="tMin" aria-label="Arrancar en la bandeja"></button></div>
+  <div class="opt"><div>Modo panel<small>Sin bordes y siempre encima; ideal para el monitor vertical</small></div><button class="tg" id="tPanel" aria-label="Modo panel"></button></div>
+  <div class="kv" id="kv"></div>
+  <div style="flex:1"></div>
+  <div class="note">Cerrar la ventana la deja en la bandeja del sistema. Para salir del todo: clic derecho en el icono → Salir.</div>
+</aside>
+<div class="toasts" id="toasts"></div>
+
+<script>
+'use strict';
+const T = window.__TAURI__;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const api = (path, body) => T ? T.core.invoke('api', {path, body: body ?? null})
+  : fetch('/api/' + path, body ? {method:'POST', body: JSON.stringify(body)} : {}).then(r => r.json());
+const DPR = () => window.devicePixelRatio || 1;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const COL = {down:'#5AA9FF', up:'#FFA94D', ok:'#3DD68C', warn:'#F5C451', bad:'#FF6B6B', line:'#1E232B', mute:'#8D96A6', dim:'#5D6675'};
+
+/* ---------------------------------------------------------------- format */
+function rate(Bps) {
+  const b = (Bps || 0) * 8;
+  if (b >= 1e9) return [(b / 1e9).toFixed(2), 'Gb/s'];
+  if (b >= 1e6) return [(b / 1e6).toFixed(b >= 1e8 ? 0 : 1), 'Mb/s'];
+  if (b >= 1e3) return [(b / 1e3).toFixed(b >= 1e5 ? 0 : 1), 'kb/s'];
+  return [Math.round(b).toString(), 'b/s'];
+}
+const rateT = x => rate(x).join(' ');
+function bytes(n) {
+  n = n || 0; const u = ['B','KB','MB','GB','TB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(n >= 100 ? 0 : 1) : n) + ' ' + u[i];
+}
+function ago(ms) {
+  if (!ms) return '—';
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 45) return 'ahora';
+  if (s < 3600) return `hace ${Math.round(s / 60)} min`;
+  if (s < 86400) return `hace ${Math.round(s / 3600)} h`;
+  return `hace ${Math.round(s / 86400)} d`;
+}
+const hhmm = t => new Date(t).toLocaleTimeString('es-ES', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+
+/* ---------------------------------------------------------------- canvas helper */
+function fit(cv) {
+  const r = cv.getBoundingClientRect(), d = DPR();
+  const w = Math.max(1, Math.round(r.width * d)), h = Math.max(1, Math.round(r.height * d));
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  const ctx = cv.getContext('2d'); ctx.setTransform(d, 0, 0, d, 0, 0);
+  return [ctx, r.width, r.height];
+}
+function smooth(ctx, pts, move = true) {
+  if (!pts.length) return;
+  if (move) ctx.moveTo(pts[0][0], pts[0][1]); else ctx.lineTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1], [x1, y1] = pts[i], mx = (x0 + x1) / 2;
+    ctx.bezierCurveTo(mx, y0, mx, y1, x1, y1);
+  }
+}
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v))), m = v / p;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p;
+}
+
+/* ---------------------------------------------------------------- state */
+const S = {
+  hist: [],            // [t, rx, tx] 1 s
+  rt: [],              // router samples {t, d:{mac:[rx,tx]}}
+  rate: null, ping: {gw: [], net: []}, router: {devices: [], ok: false},
+  lan: [], conns: [], listen: [], ifc: {}, pub: null,
+  seenConn: new Set(), firstConns: true, devUp: new Map(), toasted: new Set(),
+  sort: 'rate', editing: null, routerErr: null,
+};
+const WINDOW = 15 * 60 * 1000;
+
+/* ---------------------------------------------------------------- devices: names, kinds, colours */
+const PAL = ['#4FD1C5','#B39DFF','#6FD08C','#FF7AA8','#E9C46A','#F28B66','#7FB4FF','#D9A6FF','#9BD45E','#FFB38A','#8FA3BF','#5EC9E8'];
+const COLORS = new Map();   // mac -> colour, unique while the palette lasts, stable for the session
+function colorOf(mac) {
+  if (!COLORS.has(mac)) {
+    let h = 0; for (const c of mac || '') h = (h * 31 + c.charCodeAt(0)) >>> 0;
+    const used = new Set(COLORS.values());
+    let pick = PAL[h % PAL.length];
+    for (let i = 0; i < PAL.length; i++) { const c = PAL[(h + i) % PAL.length]; if (!used.has(c)) { pick = c; break; } }
+    COLORS.set(mac, pick);
+  }
+  return COLORS.get(mac);
+}
+const realName = s => (s && !/^(unknown|desconocido|\*|-)$/i.test(s.trim())) ? s : '';
+function nameOf(d) { return d.label || realName(d.rname) || realName(d.name) || d.h || (d.me ? 'Este PC' : d.gw ? 'Router' : 'Desconocido'); }
+function kindOf(d) {
+  const s = `${d.label || ''} ${d.rname || ''} ${d.name || ''} ${d.h || ''}`.toLowerCase();
+  if (d.gw || /router|archer|gateway/.test(s)) return 'router';
+  if (d.me || /\bpc\b|desktop|laptop|port[aá]til|ordenador/.test(s)) return 'pc';
+  if (/repetidor|repeater|re\d{3}|extender|mesh/.test(s)) return 'wifi';
+  if (/tv|televisor|chromecast|fire ?stick|roku|sei box|android ?tv/.test(s)) return 'tv';
+  if (/enchufe|plug|meross|shelly|tapo|sonoff|bombilla|bulb/.test(s)) return 'plug';
+  if (/robot|roomba|irobot|aspirador|vacuum/.test(s)) return 'robot';
+  if (/m[oó]vil|phone|pixel|iphone|oneplus|galaxy|xiaomi|redmi|android|ipad|tablet/.test(s)) return 'phone';
+  return 'unk';
+}
+const GLYPH = {
+  router:'<rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 13 5 6M17 13l2-7"/><path d="M7 16.5h.01M10.5 16.5h.01"/>',
+  pc:'<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
+  phone:'<rect x="7" y="2.5" width="10" height="19" rx="2.2"/><path d="M11 18.5h2"/>',
+  tv:'<rect x="2.5" y="5" width="19" height="12.5" rx="2"/><path d="M8 21h8"/>',
+  plug:'<path d="M9 2.5v5M15 2.5v5"/><path d="M6.5 7.5h11v3.5a5.5 5.5 0 0 1-11 0z"/><path d="M12 16.5v5"/>',
+  robot:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="9" r="2.2"/><path d="M7 15.5h10"/>',
+  wifi:'<path d="M2.5 9a14 14 0 0 1 19 0M5.5 12.5a9.5 9.5 0 0 1 13 0M9 16a4.5 4.5 0 0 1 6 0"/><path d="M12 19.5h.01"/>',
+  unk:'<circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .8-1 1.5v.6M12 17h.01"/>',
+};
+const glyph = k => `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${GLYPH[k]}</svg>`;
+
+/* ---------------------------------------------------------------- main mirror chart */
+const mainTip = $('mainTip');
+let mainHover = null;
+$('mainBox').addEventListener('mousemove', e => { const r = e.currentTarget.getBoundingClientRect(); mainHover = e.clientX - r.left; });
+$('mainBox').addEventListener('mouseleave', () => { mainHover = null; mainTip.style.opacity = 0; });
+
+function drawMain() {
+  const [ctx, w, h] = fit($('main'));
+  ctx.clearRect(0, 0, w, h);
+  const now = Date.now(), t0 = now - WINDOW;
+  const pts = S.hist.filter(p => p[0] >= t0);
+  const padL = 58, padR = 6, padT = 8, padB = 22;
+  const mid = padT + (h - padT - padB) * 0.62;              // download gets more room than upload
+  const hD = mid - padT - 4, hU = h - padB - mid - 4;
+  const mxD = niceMax(Math.max(...pts.map(p => p[1]), 1e4) * 1.1);
+  const mxU = niceMax(Math.max(...pts.map(p => p[2]), 1e4) * 1.1);
+  const X = t => padL + (t - t0) / WINDOW * (w - padL - padR);
+  // grid
+  ctx.font = '11px ' + 'Segoe UI, sans-serif'; ctx.textBaseline = 'middle'; ctx.textAlign = 'right';
+  ctx.strokeStyle = COL.line; ctx.lineWidth = 1;
+  for (const f of [0.5, 1]) {
+    const yd = mid - 4 - hD * f, yu = mid + 4 + hU * f;
+    ctx.beginPath(); ctx.moveTo(padL, yd); ctx.lineTo(w - padR, yd); ctx.moveTo(padL, yu); ctx.lineTo(w - padR, yu); ctx.stroke();
+    ctx.fillStyle = COL.dim; ctx.fillText(rateT(mxD * f), padL - 8, yd); ctx.fillText(rateT(mxU * f), padL - 8, yu);
+  }
+  ctx.strokeStyle = '#2A313B'; ctx.beginPath(); ctx.moveTo(padL, mid); ctx.lineTo(w - padR, mid); ctx.stroke();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'; ctx.fillStyle = COL.dim;
+  for (let m = 15; m >= 0; m -= 5) ctx.fillText(m ? `−${m} min` : 'ahora', Math.min(w - 22, Math.max(padL + 18, X(now - m * 60000))), h - 5);
+  if (pts.length < 2) return;
+  const series = (idx, sign, mx, hh, col) => {
+    const P = pts.map(p => [X(p[0]), mid + sign * (4 + Math.min(1, p[idx] / mx) * hh)]);
+    const g = ctx.createLinearGradient(0, mid, 0, mid + sign * hh);
+    g.addColorStop(0, col + '08'); g.addColorStop(1, col + '55');
+    ctx.beginPath(); ctx.moveTo(P[0][0], mid + sign * 4); smooth(ctx, P, false); ctx.lineTo(P[P.length - 1][0], mid + sign * 4); ctx.closePath();
+    ctx.fillStyle = g; ctx.fill();
+    ctx.beginPath(); smooth(ctx, P); ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.stroke();
+    const L = P[P.length - 1];
+    ctx.beginPath(); ctx.arc(L[0], L[1], 3.2, 0, 7); ctx.fillStyle = col; ctx.fill();
+  };
+  series(1, -1, mxD, hD, COL.down);
+  series(2, 1, mxU, hU, COL.up);
+  if (mainHover != null && mainHover > padL) {
+    const t = t0 + (mainHover - padL) / (w - padL - padR) * WINDOW;
+    let best = pts[0]; for (const p of pts) if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
+    const x = X(best[0]);
+    ctx.strokeStyle = 'rgba(230,233,239,.25)'; ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, h - padB); ctx.stroke();
+    mainTip.innerHTML = `<span class="mute">${hhmm(best[0])}</span><br><span class="c-down">↓ ${rateT(best[1])}</span> &nbsp; <span class="c-up">↑ ${rateT(best[2])}</span>`;
+    mainTip.style.opacity = 1;
+    mainTip.style.left = Math.min(w - mainTip.offsetWidth - 4, x + 12) + 'px'; mainTip.style.top = '6px';
+  }
+}
+
+/* ---------------------------------------------------------------- sparklines */
+function spark(cv, vals, col, fixedMax) {
+  const [ctx, w, h] = fit(cv); ctx.clearRect(0, 0, w, h);
+  const v = vals.map(x => x == null ? null : x);
+  const good = v.filter(x => x != null); if (good.length < 2) return;
+  const mx = fixedMax || Math.max(...good) * 1.15 || 1;
+  const P = []; v.forEach((x, i) => { if (x != null) P.push([i / (v.length - 1) * w, h - 2 - Math.min(1, x / mx) * (h - 4)]); });
+  const g = ctx.createLinearGradient(0, 0, 0, h); g.addColorStop(0, col + '40'); g.addColorStop(1, col + '00');
+  ctx.beginPath(); ctx.moveTo(P[0][0], h); smooth(ctx, P, false); ctx.lineTo(P[P.length - 1][0], h); ctx.closePath(); ctx.fillStyle = g; ctx.fill();
+  ctx.beginPath(); smooth(ctx, P); ctx.strokeStyle = col; ctx.lineWidth = 1.4; ctx.stroke();
+}
+
+/* ---------------------------------------------------------------- streamgraph */
+const streamTip = $('streamTip');
+let streamHover = null;
+$('streamBox').addEventListener('mousemove', e => { const r = e.currentTarget.getBoundingClientRect(); streamHover = [e.clientX - r.left, e.clientY - r.top]; });
+$('streamBox').addEventListener('mouseleave', () => { streamHover = null; streamTip.style.opacity = 0; });
+
+function drawStream() {
+  const [ctx, w, h] = fit($('stream')); ctx.clearRect(0, 0, w, h);
+  const now = Date.now(), span = 10 * 60 * 1000, t0 = now - span;
+  const smp = S.rt.filter(s => s.t >= t0);
+  if (smp.length < 2) {
+    ctx.fillStyle = COL.dim; ctx.font = '13px Segoe UI, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(S.router.ok ? 'Reuniendo datos del router…' : (S.router.error || 'Sin datos del router'), w / 2, h / 2);
+    $('streamLeg').innerHTML = ''; return;
+  }
+  const tot = {};
+  for (const s of smp) for (const [m, [a, b]] of Object.entries(s.d)) tot[m] = (tot[m] || 0) + a + b;
+  const macs = Object.keys(tot).filter(m => tot[m] > 0).sort((a, b) => tot[b] - tot[a]);
+  const X = t => (t - t0) / span * w;
+  const sums = smp.map(s => macs.reduce((acc, m) => acc + ((s.d[m] || [0, 0])[0] + (s.d[m] || [0, 0])[1]), 0));
+  const mx = Math.max(...sums, 2e4) * 1.08;
+  const H = h - 20, mid = H / 2;
+  const K = v => v / mx * H;
+  const base = smp.map((s, i) => mid - K(sums[i]) / 2);   // centred "silhouette" baseline
+  const acc = smp.map(() => 0);
+  const byMac = devMap();
+  let hit = null;
+  for (const m of macs) {
+    const top = [], bot = [];
+    smp.forEach((s, i) => {
+      const v = (s.d[m] || [0, 0])[0] + (s.d[m] || [0, 0])[1];
+      const y0 = base[i] + K(acc[i]); acc[i] += v; const y1 = base[i] + K(acc[i]);
+      top.push([X(s.t), y0]); bot.push([X(s.t), y1]);
+    });
+    const col = colorOf(m);
+    ctx.beginPath(); smooth(ctx, top); smooth(ctx, bot.slice().reverse(), false); ctx.closePath();
+    ctx.fillStyle = col + 'CC'; ctx.fill();
+    ctx.strokeStyle = 'rgba(11,13,16,.55)'; ctx.lineWidth = 1; ctx.stroke();
+    if (streamHover && !hit && ctx.isPointInPath(streamHover[0] * DPR(), streamHover[1] * DPR())) hit = m;
+  }
+  ctx.fillStyle = COL.dim; ctx.font = '11px Segoe UI, sans-serif'; ctx.textAlign = 'center';
+  for (let m = 10; m >= 0; m -= 5) ctx.fillText(m ? `−${m} min` : 'ahora', Math.min(w - 20, Math.max(22, X(now - m * 60000))), h - 4);
+  if (hit && streamHover) {
+    const d = byMac.get(hit) || {mac: hit};
+    const last = S.router.devices.find(x => x.mac === hit) || {};
+    streamTip.innerHTML = `<b>${esc(nameOf(d))}</b><br><span class="c-down">↓ ${rateT(last.rateRx)}</span> &nbsp; <span class="c-up">↑ ${rateT(last.rateTx)}</span><br><span class="mute">${(tot[hit] / macs.reduce((a, m) => a + tot[m], 0) * 100).toFixed(0)}% del tráfico en 10 min</span>`;
+    streamTip.style.opacity = 1;
+    streamTip.style.left = Math.min(w - streamTip.offsetWidth - 4, streamHover[0] + 14) + 'px';
+    streamTip.style.top = Math.max(0, streamHover[1] - 20) + 'px';
+  } else streamTip.style.opacity = 0;
+  const all = macs.reduce((a, m) => a + tot[m], 0) || 1;
+  $('streamLeg').innerHTML = macs.slice(0, 10).map(m => `<span><i style="background:${colorOf(m)}"></i>${esc(nameOf(byMac.get(m) || {mac: m}))} <span class="dim num">${Math.round(tot[m] / all * 100)}%</span></span>`).join('');
+}
+
+/* ---------------------------------------------------------------- devices list */
+function devMap() {
+  const m = new Map();
+  for (const d of S.lan) m.set(d.mac, d);
+  for (const r of S.router.devices) if (!m.has(r.mac)) m.set(r.mac, {mac: r.mac, ip: r.ip, name: r.name, label: r.label});
+  for (const r of S.router.devices) { const d = m.get(r.mac); if (d && !d.rname) d.rname = r.name; }
+  [...m.keys()].sort().forEach(colorOf);   // assign colours in MAC order so they don't depend on sorting
+  return m;
+}
+function devHist(mac) { return S.rt.slice(-200).map(s => { const v = s.d[mac]; return v ? v[0] + v[1] : 0; }); }
+
+function renderDevices() {
+  if (S.editing) return;
+  const rmap = new Map(S.router.devices.map(r => [r.mac, r]));
+  const list = [...devMap().values()];
+  const val = d => { const r = rmap.get(d.mac); return r ? r.rateRx + r.rateTx : 0; };
+  const ipn = d => (d.ip || '0.0.0.0').split('.').reduce((a, x) => a * 256 + (+x || 0), 0);
+  list.sort(S.sort === 'rate' ? (a, b) => (val(b) - val(a)) || (b.up - a.up) || (ipn(a) - ipn(b)) : (a, b) => ipn(a) - ipn(b));
+  const mx = Math.max(...list.map(d => { const r = rmap.get(d.mac); return r ? Math.max(r.rateRx, r.rateTx) : 0; }), 125000);
+  const up = list.filter(d => d.up !== false).length, unk = list.filter(d => !d.known && !d.me && !d.gw).length;
+  $('devSub').textContent = `${up} activos de ${list.length}` + (unk ? ` · ${unk} sin identificar` : '');
+  $('nDev').innerHTML = `${up}<small>/ ${list.length}</small>`;
+  $('nDevS').textContent = unk ? `${unk} sin identificar` : 'todos identificados';
+  $('devs').innerHTML = list.map(d => {
+    const r = rmap.get(d.mac), on = d.up !== false;
+    const w = v => Math.min(100, Math.sqrt((v || 0) / mx) * 100).toFixed(1);
+    const sub = [d.ip ? `<span class="mono">${esc(d.ip)}</span>` : '', (d.h && d.h !== nameOf(d)) ? esc(d.h) : (d.rname && d.rname !== nameOf(d) ? esc(d.rname) : ''), `<span class="mono dim">${esc(d.mac)}</span>`].filter(Boolean).join(' · ');
+    const tags = (d.new ? '<span class="tag new">Nuevo</span>' : '') + (!d.known && !d.me && !d.gw ? '<span class="tag warn">Sin identificar</span>' : '') + (d.randomMac ? '<span class="tag" title="MAC aleatoria (privacidad del móvil)">MAC aleatoria</span>' : '');
+    return `<div class="dv ${on ? '' : 'off'}" data-mac="${esc(d.mac)}">
+      <div class="gl" style="color:${colorOf(d.mac)}">${glyph(kindOf(d))}<i class="sd ${on ? 'on' : ''}"></i></div>
+      <div class="nm"><div class="n"><span class="t" data-mac="${esc(d.mac)}" title="Clic para renombrar">${esc(nameOf(d))}</span>${tags}</div>
+        <div class="m">${sub}${on ? '' : ` · <span class="dim">${d.last ? 'visto ' + ago(d.last) : 'inactivo'}</span>`}</div></div>
+      <div class="rt">${r ? `
+        <div class="row"><span class="c-down" style="text-align:left">↓</span><div class="tr"><i style="width:${w(r.rateRx)}%;background:var(--down)"></i></div><span class="num">${rateT(r.rateRx)}</span></div>
+        <div class="row"><span class="c-up" style="text-align:left">↑</span><div class="tr"><i style="width:${w(r.rateTx)}%;background:var(--up)"></i></div><span class="num">${rateT(r.rateTx)}</span></div>`
+        : `<div class="dim" style="font-size:12px">${d.me ? 'ver gráfico principal' : 'sin datos del router'}</div>`}</div>
+      <canvas class="spk" data-mac="${esc(d.mac)}"></canvas>
+    </div>`;
+  }).join('');
+  drawDevSparks();
+}
+// shared floor (≈0.4 Mb/s) so idle devices draw flat instead of magnifying a few bytes of noise
+function drawDevSparks() {
+  document.querySelectorAll('.spk').forEach(cv => { const h = devHist(cv.dataset.mac); spark(cv, h, colorOf(cv.dataset.mac), Math.max(50000, ...h) * 1.15); });
+}
+$('devs').addEventListener('click', e => {
+  const t = e.target.closest('span.t'); if (!t || S.editing) return;
+  const mac = t.dataset.mac, d = devMap().get(mac) || {};
+  S.editing = mac;
+  const inp = document.createElement('input'); inp.value = d.label || ''; inp.placeholder = nameOf(d);
+  t.replaceWith(inp); inp.focus(); inp.select();
+  const done = async save => {
+    if (!S.editing) return; S.editing = null;
+    if (save) { try { await api('known', {mac, label: inp.value}); } catch {} await pollLan(); }
+    renderDevices();
+  };
+  inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') done(true); if (ev.key === 'Escape') done(false); });
+  inp.addEventListener('blur', () => done(true));
+});
+$('devSort').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  S.sort = b.dataset.k; [...$('devSort').children].forEach(x => x.classList.toggle('on', x === b)); renderDevices();
+});
+
+/* ---------------------------------------------------------------- activity log */
+function logEv(kind, html, t = Date.now()) {
+  const col = {conn: COL.down, lan: COL.ok, off: COL.dim, warn: COL.warn, bad: COL.bad}[kind] || COL.mute;
+  const el = document.createElement('div'); el.className = 'ev fresh';
+  el.innerHTML = `<span class="t">${hhmm(t).slice(0, 5)}</span><i class="k" style="background:${col}"></i><span class="x">${html}</span>`;
+  const box = $('log'); box.prepend(el);
+  while (box.children.length > 250) box.lastChild.remove();
+}
+function toast(title, body) {
+  const el = document.createElement('div'); el.className = 'toast';
+  el.innerHTML = `<b>${esc(title)}</b>${esc(body)}`; $('toasts').append(el);
+  setTimeout(() => el.remove(), 7000);
+}
+
+/* ---------------------------------------------------------------- polling */
+async function pollRate() {
+  try {
+    const r = await api('rate'); S.rate = r;
+    if (r.t && (!S.hist.length || r.t > S.hist[S.hist.length - 1][0])) S.hist.push([r.t, r.rx, r.tx]);
+    while (S.hist.length && S.hist[0][0] < Date.now() - WINDOW - 5000) S.hist.shift();
+    const a = rate(r.rx), b = rate(r.tx);
+    $('vDown').innerHTML = `${a[0]}<small>${a[1]}</small>`; $('vUp').innerHTML = `${b[0]}<small>${b[1]}</small>`;
+    $('pDown').textContent = rateT(Math.max(...S.hist.map(p => p[1]), 0));
+    $('pUp').textContent = rateT(Math.max(...S.hist.map(p => p[2]), 0));
+    $('sDown').textContent = bytes(r.sessRx); $('sUp').textContent = bytes(r.sessTx);
+  } catch {}
+}
+async function pollPing() {
+  try {
+    const p = await api('ping'); S.ping = p;
+    const show = (arr, id, sid, cv, col, base) => {
+      const ok = arr.filter(x => x != null), last = arr[arr.length - 1];
+      $(id).innerHTML = last == null ? '<span style="color:var(--bad)">sin respuesta</span>' : `${last.toFixed(1)}<small>ms</small>`;
+      if (ok.length > 2) {
+        const avg = ok.reduce((a, b) => a + b, 0) / ok.length;
+        const jit = ok.slice(1).reduce((a, x, i) => a + Math.abs(x - ok[i]), 0) / (ok.length - 1);
+        const loss = Math.round((arr.length - ok.length) / arr.length * 100);
+        $(sid).textContent = `${base}media ${avg.toFixed(1)} · jitter ${jit.toFixed(1)}${loss ? ` · ${loss}% perdidos` : ''}`;
+      }
+      spark($(cv), arr.slice(-45), col);
+    };
+    show(p.gw, 'lGw', 'lGwS', 'kGw', COL.ok, '');
+    show(p.net, 'lNet', 'lNetS', 'kNet', COL.warn, '');
+    const last = p.net[p.net.length - 1];
+    $('sNet').className = 'dot ' + (last == null ? 'bad' : last > 80 ? 'warn' : 'ok');
+  } catch {}
+}
+async function pollRouter() {
+  try {
+    const r = await api('router'); S.router = r;
+    if (r.ok && r.t && (!S.rt.length || r.t > S.rt[S.rt.length - 1].t)) {
+      const d = {}; for (const x of r.devices) d[x.mac] = [x.rateRx, x.rateTx];
+      S.rt.push({t: r.t, d}); while (S.rt.length > 220) S.rt.shift();
+    }
+    $('sRouter').className = 'dot ' + (r.ok && r.enabled ? 'ok' : r.ok ? 'warn' : 'bad');
+    const err = r.ok ? (r.enabled ? null : r.error) : r.error;
+    if (err !== S.routerErr) { if (err) logEv('warn', 'Router: ' + esc(err)); else if (S.routerErr) logEv('lan', 'Router: conectado'); S.routerErr = err; }
+    $('devNote').textContent = err ? `Router: ${err}` : 'Tráfico por dispositivo del monitor del router (solo IPv4). Haz clic en un nombre para renombrarlo.';
+    renderDevices();
+  } catch {}
+}
+async function pollLan() {
+  try {
+    const l = await api('lan'); S.lan = l.devices;
+    $('sLan').className = 'dot ' + (l.lastScan ? 'ok' : '');
+    $('sLanT').textContent = l.scanning ? 'Escaneando…' : 'Red local';
+    for (const d of l.devices) {
+      const prev = S.devUp.get(d.mac);
+      if (prev !== undefined && prev !== d.up && d.last != null) logEv(d.up ? 'lan' : 'off', `${esc(nameOf(d))} ${d.up ? 'se ha conectado' : 'se ha desconectado'} <span class="dim mono">${esc(d.ip)}</span>`);
+      S.devUp.set(d.mac, d.up);
+      if (d.new && !S.toasted.has(d.mac)) { S.toasted.add(d.mac); toast('Dispositivo nuevo en la red', `${d.ip} · ${d.h || d.mac}`); logEv('warn', `Dispositivo <b>nuevo</b>: ${esc(d.ip)} <span class="mono dim">${esc(d.mac)}</span>`); }
+    }
+    renderDevices();
+  } catch {}
+}
+async function pollConns() {
+  try {
+    const c = await api('conns'); S.conns = c.conns; S.listen = c.listen;
+    const keys = new Set();
+    for (const x of c.conns) {
+      const k = `${x.p}|${x.ra}|${x.rp}`; keys.add(k);
+      if (!S.seenConn.has(k) && !S.firstConns) logEv('conn', `<b>${esc(x.p)}</b> → ${esc(x.h || x.ra)}<span class="dim">:${x.rp}</span>`);
+    }
+    S.seenConn = keys; S.firstConns = false;
+    const inet = c.conns.filter(x => !x.lan).length;
+    $('nCon').textContent = c.conns.length; $('nConS').textContent = `${inet} a internet · ${c.conns.length - inet} locales`;
+    renderConns(); renderProcs(); renderPorts();
+  } catch {}
+}
+async function pollInfo() {
+  try {
+    const i = await api('info'); S.ifc = i.ifc; S.pub = i.publicIp;
+    $('ifc').innerHTML = i.ifc.ip ? `<b>${esc(i.ifc.name || 'red')}</b>${i.ifc.speed ? ' · ' + esc(i.ifc.speed) : ''} · <span class="mono">${esc(i.ifc.ip)}</span> · gw <span class="mono">${esc(i.ifc.gw)}</span>` : 'detectando interfaz…';
+    $('pub').textContent = i.publicIp || '—';
+    const [y, m, d] = i.exposure.checked.split('-'); $('expDate').textContent = `verificado ${d}/${m}/${y}`;
+    const ok = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M20 6 9 17l-5-5"/></svg>';
+    const wr = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>';
+    $('sec').innerHTML = i.exposure.items.map(([t, v, g]) => `<div class="chk ${g ? 'ok' : 'warn'}">${g ? ok : wr}<div>${esc(t)}<small>${esc(v)}</small></div></div>`).join('');
+  } catch {}
+}
+async function loadHistory() {
+  try {
+    const h = await api('history');
+    S.hist = h.rate.map(p => [p[0], p[1], p[2]]);
+    S.rt = h.router;
+  } catch {}
+}
+
+/* ---------------------------------------------------------------- tables */
+function renderConns() {
+  const q = $('filter').value.trim().toLowerCase();
+  const rows = S.conns.filter(x => !q || `${x.p} ${x.ra} ${x.h} ${x.rp}`.toLowerCase().includes(q))
+    .sort((a, b) => (a.lan - b.lan) || a.p.localeCompare(b.p) || (a.h || a.ra).localeCompare(b.h || b.ra));
+  $('connSub').textContent = q ? `${rows.length} de ${S.conns.length}` : `${S.conns.length} establecidas`;
+  $('conns').innerHTML = rows.map(x => `<tr><td><b>${esc(x.p)}</b></td><td title="${esc(x.ra)}">${x.h ? esc(x.h) + ` <span class="mono dim">${esc(x.ra)}</span>` : `<span class="mono">${esc(x.ra)}</span>`}</td><td class="hide-n mono">${x.rp}</td><td>${x.lan ? '<span class="tag">LAN</span>' : '<span class="tag ok">Internet</span>'}${x.v6 ? ' <span class="dim" style="font-size:11px">v6</span>' : ''}</td></tr>`).join('')
+    || `<tr><td colspan="4" class="dim" style="text-align:center;padding:20px">Sin coincidencias</td></tr>`;
+}
+$('filter').addEventListener('input', renderConns);
+
+function renderProcs() {
+  const g = new Map();
+  for (const x of S.conns) {
+    const e = g.get(x.p) || {n: 0, inet: 0, hosts: new Map()};
+    e.n++; if (!x.lan) e.inet++;
+    const h = x.h ? x.h.split('.').slice(-3).join('.') : x.ra;
+    e.hosts.set(h, (e.hosts.get(h) || 0) + 1); g.set(x.p, e);
+  }
+  const list = [...g.entries()].sort((a, b) => b[1].n - a[1].n);
+  const mx = Math.max(1, ...list.map(([, e]) => e.n));
+  $('procSub').textContent = `${list.length} programas`;
+  $('procs').innerHTML = list.slice(0, 14).map(([p, e]) => {
+    const hosts = [...e.hosts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([h]) => esc(h)).join(' · ');
+    return `<div class="pr"><div class="n">${esc(p)}</div><div class="c num">${e.n} conexión${e.n > 1 ? 'es' : ''}</div><div class="b"><i style="width:${e.n / mx * 100}%"></i></div><div class="h">${hosts}</div></div>`;
+  }).join('') || '<div class="dim">Sin conexiones</div>';
+}
+function renderPorts() {
+  $('ports').innerHTML = S.listen.map(l => `<span class="port"><b>${l.port}</b> ${esc(l.p)}</span>`).join('') || '<span class="dim">Ninguno</span>';
+}
+
+/* ---------------------------------------------------------------- window & settings */
+async function loadSettings() {
+  try {
+    const s = await api('settings');
+    $('tAuto').classList.toggle('on', s.autostart); $('tMin').classList.toggle('on', s.startMinimized); $('tPanel').classList.toggle('on', s.panel);
+    setPanelUi(s.panel);
+    $('kv').innerHTML = `<b>Versión</b> ${esc(s.version)}${s.frozen ? '' : ' (desarrollo)'}<br><b>Datos</b> ${esc(s.dataDir)}<br><b>Router</b> ${S.router.ok ? 'conectado' : esc(S.router.error || 'sin conexión')}<br><b>Interfaz</b> ${esc(S.ifc.desc || S.ifc.name || '—')}`;
+  } catch {}
+}
+function setPanelUi(on) { document.body.classList.toggle('panel', !!on); $('bPanel').classList.toggle('on', !!on); $('tPanel').classList.toggle('on', !!on); }
+const drawer = open => { $('drawer').classList.toggle('open', open); $('scrim').classList.toggle('on', open); if (open) loadSettings(); };
+$('bSet').onclick = () => drawer(!$('drawer').classList.contains('open'));
+$('scrim').onclick = () => drawer(false);
+$('tAuto').onclick = async () => { await api('settings', {autostart: !$('tAuto').classList.contains('on')}); loadSettings(); };
+$('tMin').onclick = async () => { await api('settings', {startMinimized: !$('tMin').classList.contains('on')}); loadSettings(); };
+$('tPanel').onclick = async () => { await api('settings', {panel: !$('tPanel').classList.contains('on')}); loadSettings(); };
+$('bShields').onclick = () => api('open', {url: 'https://www.grc.com/shieldsup'});
+const fullscreen = () => T ? T.core.invoke('toggle_fullscreen') : (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
+$('bFull').onclick = fullscreen;
+$('bPanel').onclick = async () => { if (T) setPanelUi(await T.core.invoke('toggle_panel')); };
+document.addEventListener('keydown', e => {
+  if (e.key === 'F11') { e.preventDefault(); fullscreen(); }
+  if (e.key === 'Escape') drawer(false);
+});
+if (T) {
+  T.event.listen('panel', e => setPanelUi(e.payload));
+  T.event.listen('visible', e => { if (e.payload) { pollRate(); pollRouter(); } });
+}
+
+/* ---------------------------------------------------------------- loop */
+let lastFrame = 0;
+function frame(now) {
+  if (!document.hidden && now - lastFrame > 90) {   // ~11 fps is plenty for 1 s data and saves GPU
+    lastFrame = now; drawMain(); drawStream();
+  }
+  requestAnimationFrame(frame);
+}
+(async () => {
+  logEv('lan', 'NetMonitor iniciado');
+  await loadHistory();
+  pollInfo(); pollRate(); pollPing(); pollRouter(); pollLan(); pollConns(); loadSettings();
+  setInterval(pollRate, 1000); setInterval(pollPing, 2000); setInterval(pollRouter, 3000);
+  setInterval(pollConns, 3000); setInterval(pollLan, 8000); setInterval(pollInfo, 30000);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

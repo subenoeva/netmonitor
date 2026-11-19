@@ -1,0 +1,360 @@
+﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+//! NetMonitor 2 — Tauri shell: samplers run on background threads, the UI polls them through `api`.
+
+mod lan;
+mod net;
+mod router;
+mod util;
+mod win;
+
+use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::thread;
+use std::time::Duration;
+use tauri::image::Image;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WindowEvent, Wry};
+use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_opener::OpenerExt;
+use util::{now_ms, setting_bool, update_settings};
+
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+static PLACED: AtomicBool = AtomicBool::new(false);
+static DIRTY_AT: AtomicU64 = AtomicU64::new(0);
+static PANEL: AtomicBool = AtomicBool::new(false);
+
+struct PanelItem(CheckMenuItem<Wry>);
+
+fn hwnd(w: &WebviewWindow) -> Option<isize> {
+    w.hwnd().ok().map(|h| h.0 as isize)
+}
+
+fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
+    app.get_webview_window("main")
+}
+
+fn show_main(app: &AppHandle) {
+    let Some(w) = main_window(app) else { return };
+    if !PLACED.swap(true, Ordering::SeqCst) {
+        let restored = hwnd(&w).map(win::restore_placement).unwrap_or(false);
+        if !restored {
+            let _ = w.center();
+        }
+    }
+    let _ = w.show();
+    if w.is_minimized().unwrap_or(false) {
+        let _ = w.unminimize();
+    }
+    let _ = w.set_focus();
+    let _ = app.emit("visible", true);
+}
+
+fn hide_main(app: &AppHandle) {
+    let Some(w) = main_window(app) else { return };
+    if let Some(h) = hwnd(&w) {
+        win::save_placement(h);
+    }
+    let _ = w.hide();
+    let _ = app.emit("visible", false);
+    if !setting_bool("trayHint", false) {
+        update_settings(|s| {
+            s.insert("trayHint".into(), json!(true));
+        });
+        notify("NetMonitor sigue vigilando", "Está en la bandeja del sistema. Para cerrarlo del todo: clic derecho en el icono → Salir.");
+    }
+}
+
+fn set_panel(app: &AppHandle, on: bool) {
+    PANEL.store(on, Ordering::SeqCst);
+    if let Some(w) = main_window(app) {
+        let _ = w.set_decorations(!on);
+        let _ = w.set_always_on_top(on);
+        if !on {
+            if let Some(h) = hwnd(&w) {
+                win::style_caption(h);
+            }
+        }
+    }
+    if let Some(item) = app.try_state::<PanelItem>() {
+        let _ = item.0.set_checked(on);
+    }
+    update_settings(|s| {
+        s.insert("panel".into(), json!(on));
+    });
+    let _ = app.emit("panel", on);
+}
+
+fn notify(title: &str, body: &str) {
+    if let Some(app) = APP_HANDLE.get() {
+        let _ = app.notification().builder().title(title).body(body).show();
+    }
+}
+
+fn exposure() -> Value {
+    // Snapshot of the audit done on 19/11/2026 (router panel + GRC ShieldsUP).
+    json!({
+        "checked": "2026-11-19",
+        "items": [
+            ["Puertos abiertos en IPv4 (0-1055, 7547, 8080, 8443)", "Ninguno (TruStealth)", true],
+            ["Responde a ping desde internet", "No", true],
+            ["Redirecciones de puertos / DMZ", "Ninguna / Desactivada", true],
+            ["UPnP", "Desactivado", true],
+            ["Gestión remota del router", "Desactivada", true],
+            ["TR-069 (CWMP) / SNMP", "Desactivados", true],
+            ["Cortafuegos SPI IPv4", "Activado", true],
+            ["Cortafuegos IPv6", "Activado, sin reglas de entrada", true],
+            ["Telnet y SSH del router en la LAN", "Abiertos (solo desde dentro)", false]
+        ]
+    })
+}
+
+fn settings_json() -> Value {
+    json!({
+        "autostart": win::autostart_enabled(),
+        "startMinimized": setting_bool("startMinimized", true),
+        "panel": PANEL.load(Ordering::SeqCst),
+        "dataDir": util::DATA.display().to_string(),
+        "version": util::VERSION,
+        "frozen": !cfg!(debug_assertions),
+    })
+}
+
+#[tauri::command]
+async fn api(app: AppHandle, path: String, body: Option<Value>) -> Result<Value, String> {
+    Ok(match (path.as_str(), body) {
+        ("rate", _) => net::rate_json(),
+        ("history", _) => json!({"rate": net::rate_history(), "router": router::router_history()}),
+        ("conns", _) => net::conns_json(),
+        ("lan", _) => lan::lan_json(),
+        ("router", _) => router::router_json(),
+        ("ping", _) => net::ping_json(),
+        ("info", _) => json!({
+            "ifc": net::ifc(), "publicIp": net::PUBLIC_IP.lock().unwrap().clone(),
+            "exposure": exposure(), "version": util::VERSION,
+        }),
+        ("settings", Some(b)) => {
+            if let Some(v) = b.get("startMinimized").and_then(Value::as_bool) {
+                update_settings(|s| {
+                    s.insert("startMinimized".into(), json!(v));
+                });
+            }
+            if b.get("autostart").is_some() || b.get("startMinimized").is_some() {
+                let want = b.get("autostart").and_then(Value::as_bool).unwrap_or_else(win::autostart_enabled);
+                win::set_autostart(want, setting_bool("startMinimized", true));
+            }
+            if let Some(p) = b.get("panel").and_then(Value::as_bool) {
+                set_panel(&app, p);
+            }
+            settings_json()
+        }
+        ("settings", None) => settings_json(),
+        ("known", Some(b)) => {
+            let mac = b.get("mac").and_then(Value::as_str).ok_or("mac")?;
+            util::set_known(mac, b.get("label").and_then(Value::as_str).unwrap_or(""));
+            json!({"ok": true})
+        }
+        ("open", Some(b)) => {
+            let url = b.get("url").and_then(Value::as_str).unwrap_or("");
+            if url.starts_with("https://") {
+                let _ = app.opener().open_url(url, None::<&str>);
+            }
+            json!({"ok": true})
+        }
+        _ => return Err(format!("unknown api: {path}")),
+    })
+}
+
+#[tauri::command]
+fn toggle_fullscreen(window: WebviewWindow) -> bool {
+    let on = !window.is_fullscreen().unwrap_or(false);
+    let _ = window.set_fullscreen(on);
+    on
+}
+
+#[tauri::command]
+fn toggle_panel(app: AppHandle) -> bool {
+    let on = !PANEL.load(Ordering::SeqCst);
+    set_panel(&app, on);
+    on
+}
+
+#[tauri::command]
+fn hide_window(app: AppHandle) {
+    hide_main(&app);
+}
+
+/// 32x32 tray icon: two live bars (download blue, upload amber) on a dark tile, log-scaled to 1 Gb/s.
+fn tray_image(rx: f64, tx: f64) -> Image<'static> {
+    const S: usize = 32;
+    let mut px = vec![0u8; S * S * 4];
+    let lvl = |bps: f64| -> usize {
+        let mbit = bps * 8.0 / 1e6;
+        if mbit <= 0.01 {
+            return 2;
+        }
+        let f = ((mbit.log10() + 2.0) / 5.0).clamp(0.0, 1.0); // 0.01 Mb/s .. 1000 Mb/s
+        (2.0 + f * 22.0).round() as usize
+    };
+    let put = |px: &mut Vec<u8>, x: usize, y: usize, c: [u8; 4]| {
+        let i = (y * S + x) * 4;
+        px[i..i + 4].copy_from_slice(&c);
+    };
+    for y in 0..S {
+        for x in 0..S {
+            // rounded tile
+            let (dx, dy) = ((x as f32 - 15.5).abs() - 10.0, (y as f32 - 15.5).abs() - 10.0);
+            let d = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt();
+            if d <= 5.5 {
+                put(&mut px, x, y, [0x16, 0x1A, 0x21, 255]);
+            }
+        }
+    }
+    let (hr, ht) = (lvl(rx), lvl(tx));
+    for y in 0..S {
+        for x in 0..S {
+            let from_bottom = 27usize.saturating_sub(y);
+            if (8..=14).contains(&x) && y <= 27 && from_bottom < hr {
+                put(&mut px, x, y, [0x5A, 0xA9, 0xFF, 255]);
+            }
+            if (17..=23).contains(&x) && y <= 27 && from_bottom < ht {
+                put(&mut px, x, y, [0xFF, 0xA9, 0x4D, 255]);
+            }
+        }
+    }
+    Image::new_owned(px, S as u32, S as u32)
+}
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![api, toggle_fullscreen, toggle_panel, hide_window])
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let _ = APP_HANDLE.set(handle.clone());
+            util::init_known();
+
+            let release = !cfg!(debug_assertions);
+            if !util::path("settings.json").exists() {
+                update_settings(|s| {
+                    s.insert("startMinimized".into(), json!(true));
+                });
+                if release {
+                    win::set_autostart(true, true);
+                }
+            } else if release && win::autostart_enabled() {
+                win::set_autostart(true, setting_bool("startMinimized", true)); // keep the exe path current
+            }
+
+            // ---- tray
+            let show = MenuItem::with_id(app, "show", "Mostrar NetMonitor", true, None::<&str>)?;
+            let panel = CheckMenuItem::with_id(app, "panel", "Modo panel (sin bordes, siempre encima)", true, false, None::<&str>)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &panel, &sep, &quit])?;
+            app.manage(PanelItem(panel));
+            TrayIconBuilder::with_id("main")
+                .icon(tray_image(0.0, 0.0))
+                .tooltip("NetMonitor")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, ev| match ev.id.as_ref() {
+                    "show" => show_main(app),
+                    "panel" => {
+                        let on = !PANEL.load(Ordering::SeqCst);
+                        set_panel(app, on);
+                    }
+                    "quit" => {
+                        if let Some(h) = main_window(app).as_ref().and_then(hwnd) {
+                            win::save_placement(h);
+                        }
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, ev| {
+                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
+                        let app = tray.app_handle();
+                        let visible = main_window(app).and_then(|w| w.is_visible().ok()).unwrap_or(false);
+                        let minimized = main_window(app).and_then(|w| w.is_minimized().ok()).unwrap_or(false);
+                        if visible && !minimized {
+                            hide_main(app);
+                        } else {
+                            show_main(app);
+                        }
+                    }
+                })
+                .build(app)?;
+
+            // ---- samplers
+            let h = handle.clone();
+            thread::spawn(move || {
+                let mut n = 0u64;
+                let mut last_icon = (usize::MAX, usize::MAX);
+                net::rate_worker(move |rx, tx| {
+                    n += 1;
+                    if let Some(t) = h.tray_by_id("main") {
+                        let key = ((rx * 8.0).max(1.0).log10() * 8.0) as usize * 1000 + ((tx * 8.0).max(1.0).log10() * 8.0) as usize;
+                        if key != last_icon.0 {
+                            last_icon = (key, 0);
+                            let _ = t.set_icon(Some(tray_image(rx, tx)));
+                        }
+                        if n % 2 == 0 {
+                            let _ = t.set_tooltip(Some(format!(
+                                "NetMonitor\n↓ {}   ↑ {}", util::fmt_rate(rx), util::fmt_rate(tx)
+                            )));
+                        }
+                    }
+                })
+            });
+            thread::spawn(|| {
+                lan::scanner(|ip, mac, host| {
+                    let what = if host.is_empty() { mac.to_string() } else { format!("{host} · {mac}") };
+                    notify("Dispositivo nuevo en la red", &format!("{ip}  {what}"));
+                })
+            });
+            thread::spawn(net::ping_worker);
+            thread::spawn(net::public_ip_worker);
+            thread::spawn(router::worker);
+
+            // ---- window
+            if let Some(w) = main_window(&handle) {
+                if let Some(h) = hwnd(&w) {
+                    win::style_caption(h);
+                }
+            }
+            if setting_bool("panel", false) {
+                set_panel(&handle, true);
+            }
+            if !std::env::args().any(|a| a == "--minimized") {
+                show_main(&handle);
+            }
+
+            // debounced placement saver (moves/resizes)
+            let h = handle.clone();
+            thread::spawn(move || loop {
+                thread::sleep(Duration::from_millis(400));
+                let d = DIRTY_AT.load(Ordering::SeqCst);
+                if d > 0 && now_ms().saturating_sub(d) > 800 && PLACED.load(Ordering::SeqCst) {
+                    DIRTY_AT.store(0, Ordering::SeqCst);
+                    if let Some(hw) = main_window(&h).as_ref().and_then(hwnd) {
+                        win::save_placement(hw);
+                    }
+                }
+            });
+            Ok(())
+        })
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                hide_main(window.app_handle());
+            }
+            WindowEvent::Moved(_) | WindowEvent::Resized(_) => DIRTY_AT.store(now_ms(), Ordering::SeqCst),
+            _ => {}
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running NetMonitor");
+}
