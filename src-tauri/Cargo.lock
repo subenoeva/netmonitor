@@ -2392,7 +2392,7 @@ dependencies = [
 
 [[package]]
 name = "netmonitor"
-version = "2.1.2"
+version = "2.1.3"
 dependencies = [
  "aes",
  "base64 0.22.1",

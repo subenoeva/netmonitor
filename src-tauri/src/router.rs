@@ -397,8 +397,12 @@ pub fn password() -> String {
             return p;
         }
     }
-    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-        .open_subkey("Environment")
+    // elevated as another account (admin-k), HKCU is that account's: read the real user's hive instead
+    let env = match crate::util::USER_SID.get() {
+        Some(sid) => winreg::RegKey::predef(winreg::enums::HKEY_USERS).open_subkey(format!("{sid}\\Environment")),
+        None => winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey("Environment"),
+    };
+    env
         .and_then(|k| k.get_value::<String, _>("TPLINK_PASS"))
         .unwrap_or_default()
 }

@@ -382,11 +382,18 @@ fn main() {
     wait_parent();
     let args: Vec<String> = std::env::args().collect();
     let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).filter(|v| !v.is_empty());
-    if let (Some(roaming), Some(local)) = (arg("--user-appdata"), arg("--user-localappdata")) {
-        // must happen before util::DATA (and gh, for updates) first read them
-        std::env::set_var("APPDATA", roaming);
-        std::env::set_var("LOCALAPPDATA", local);
+    // Running as another account than the desktop's owner (UAC from a standard user, whether via our
+    // button or "Run as administrator"): keep using that user's folders and registry hive.
+    // Must happen before util::DATA (and gh, for updates) first read them.
+    if let Some((sid, profile)) = util::desktop_user() {
+        let p = std::path::Path::new(&profile);
+        let roaming = arg("--user-appdata").cloned().unwrap_or_else(|| p.join(r"AppData\Roaming").display().to_string());
+        let local = arg("--user-localappdata").cloned().unwrap_or_else(|| p.join(r"AppData\Local").display().to_string());
+        std::env::set_var("APPDATA", &roaming);
+        std::env::set_var("LOCALAPPDATA", &local);
         FOREIGN.store(true, Ordering::SeqCst);
+        let _ = util::USER_SID.set(sid.clone());
+        util::log(&format!("running for desktop user {sid} (data {roaming})"));
     }
     if net::elevated() {
         // WebView2 refuses a user-data folder that a process at another integrity level is (or was just)
